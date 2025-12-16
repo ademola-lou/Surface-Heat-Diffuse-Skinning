@@ -28,6 +28,13 @@
 #include "tribox.h"
 #include <random>
 
+#include <emscripten/bind.h>
+#include <emscripten/val.h>
+#include <emscripten.h>
+
+using namespace emscripten;
+
+
 #if defined(_WIN32) || defined(__WIN32__)
 #define M_PI 3.14159265358979323846
 #endif
@@ -37,6 +44,11 @@ std::uniform_real_distribution<float> mt_dist_00_10(0.0f, 1.0f);
 std::uniform_real_distribution<float> mt_dist_05_05(-0.5f, 0.5f);
 std::uniform_real_distribution<float> mt_dist_00_2PI(0.0f, 2.0f * M_PI);
 std::uniform_real_distribution<float> mt_dist_N10_10(-1.0f, 1.0f);
+
+// Custom cube root function since std::cbrt might not be available
+inline float custom_cbrt(float x) {
+    return std::pow(x, 1.0f/3.0f);
+}
 
 // helper function
 void split_string(const std::string&        s,
@@ -175,6 +187,10 @@ bool operator()(const structvec3& a, const structvec3& b) const
 // 3d voxel grid class
 class VoxelGrid {
 public:
+std::vector<Vertex> vertices;
+std::vector<Triangle> triangles;
+std::vector<Bone> bones;
+std::vector<Bone_Point> bone_points;
 VoxelGrid(const std::string& _mesh_file,
           const std::string& _bone_file,
           const std::string& _weight_file,
@@ -190,7 +206,7 @@ VoxelGrid(const std::string& _mesh_file,
 	mesh_file = _mesh_file;
 	bone_file = _bone_file;
 	weight_file = _weight_file;
-	max_grid_num = _max_grid_num;
+	max_grid_num = _max_grid_num; // Keep the requested grid size
 	max_diffuse_loop = _max_diffuse_loop;
 	max_sample_num = _max_sample_num;
 	max_influence = _max_influence;
@@ -229,6 +245,31 @@ VoxelGrid(const std::string& _mesh_file,
 	grid_num_x = ceilf(bb_std.x * inv_grid_size) + 1;
 	grid_num_y = ceilf(bb_std.y * inv_grid_size) + 1;
 	grid_num_z = ceilf(bb_std.z * inv_grid_size) + 1;
+    
+    // Log the grid dimensions for diagnostic purposes
+    std::cout << "Original grid dimensions: " << grid_num_x << " x " << grid_num_y << " x " << grid_num_z << std::endl;
+    
+    // Check if the grid size would exceed available memory
+    size_t totalVoxels = static_cast<size_t>(grid_num_z) * grid_num_y * grid_num_x;
+    // Calculate approximately how much memory we would need (rough estimate)
+    // Each voxel is an object that can contain variable numbers of vertices and triangles
+    // We'll use a conservative estimate to check if we should cap dimensions
+    const size_t MAX_VOXELS = 67108864; // 64M voxels, reasonable for WebAssembly
+    
+    if (totalVoxels > MAX_VOXELS) {
+        // Calculate scaling factor to reduce dimensions proportionally
+        float scaleFactor = std::pow(static_cast<float>(MAX_VOXELS) / totalVoxels, 1.0f/3.0f);
+        
+        // Apply scaling to grid dimensions, ensuring minimums
+        grid_num_x = std::max(static_cast<int>(grid_num_x * scaleFactor), 10);
+        grid_num_y = std::max(static_cast<int>(grid_num_y * scaleFactor), 10);
+        grid_num_z = std::max(static_cast<int>(grid_num_z * scaleFactor), 10);
+        
+        // Recalculate total voxels after adjustment
+        totalVoxels = static_cast<size_t>(grid_num_z) * grid_num_y * grid_num_x;
+        std::cout << "Adjusted grid dimensions: " << grid_num_x << " x " << grid_num_y 
+                  << " x " << grid_num_z << " = " << totalVoxels << " voxels" << std::endl;
+    }
 
 	// move down the grid offset with half of the grid size.
 	grid_offset = bb_min - structvec3(grid_size, grid_size, grid_size) * 0.5f;
@@ -269,60 +310,62 @@ VoxelGrid(const std::string& _mesh_file,
 
 void calculate_all_voxel_darkness()
 {
-	int supported_thread_num = std::thread::hardware_concurrency();
-	// at least we can do with one thread
-	if (supported_thread_num == 0) {
-		supported_thread_num = 1;
-	}
-	std::cout << "supported thread num: " << supported_thread_num << std::endl;
+	// int supported_thread_num = std::thread::hardware_concurrency();
+	// // at least we can do with one thread
+	// if (supported_thread_num == 0) {
+	// 	supported_thread_num = 1;
+	// }
+	// std::cout << "supported thread num: " << supported_thread_num << std::endl;
 
-	std::cout << "Calculating voxels darkness..." << std::endl;
-	std::vector<std::thread> threads(supported_thread_num);
+	// std::cout << "Calculating voxels darkness..." << std::endl;
+	// std::vector<std::thread> threads(supported_thread_num);
 
-	// start all threads
-	for (int i = 0; i < supported_thread_num; i++) {
-		threads[i] = std::thread(&VoxelGrid::calculate_darkness_in_range, this, i, supported_thread_num);
-	}
+	// // start all threads
+	// for (int i = 0; i < supported_thread_num; i++) {
+	// 	threads[i] = std::thread(&VoxelGrid::calculate_darkness_in_range, this, i, supported_thread_num);
+	// }
 
-	// wait for all threads end
-	for (int i = 0; i < supported_thread_num; i++) {
-		threads[i].join();
-	}
+	// // wait for all threads end
+	// for (int i = 0; i < supported_thread_num; i++) {
+	// 	threads[i].join();
+	// 	std::cout <<"thread succedded!" <<std::endl;
+	// }
+
+	//use single thread since we are on browser
+	calculate_darkness_in_range(0, 1); 
+}
+void run_in_worker()
+{
+  printf("Hello from Wasm Worker!\n");
 }
 
 void diffuse_all_heats()
 {
-	int supported_thread_num = std::thread::hardware_concurrency();
-	// at least we can do with one thread
-	if (supported_thread_num == 0) {
-		supported_thread_num = 1;
-	}
-	std::cout << "supported thread num: " << supported_thread_num << std::endl;
-
 	std::cout << "Diffusing heats..." << std::endl;
-	for (int i = 0; i < max_grid_num * max_diffuse_loop; i++) {
-		std::cout << "Diffuse pass: " << i << std::endl;
 
-		std::vector<std::thread> threads(supported_thread_num);
+    // For larger grid sizes, reduce the number of iterations to prevent excessive computation
+    int max_iterations = max_grid_num * max_diffuse_loop;
+    if (max_grid_num > 1024) {
+        // Reduce iterations for larger grids to keep computation manageable
+        max_iterations = std::min(max_iterations, max_grid_num * 3);
+        std::cout << "Large grid size detected. Capping iterations at " << max_iterations << std::endl;
+    }
 
-		// start all threads
-		for (int j = 0; j < supported_thread_num; j++) {
-			threads[j] = std::thread(&VoxelGrid::diffuse_vertex_in_range, this, j, supported_thread_num);
-		}
+    for (int i = 0; i < max_iterations; i++) {
+        // Show progress periodically
+        if (i % 10 == 0) {
+            std::cout << "Diffuse pass: " << i << std::endl;
+        }
+        
+        diffuse_vertex_in_range(0, 1); // Use a single thread
+        ping_pong = !ping_pong;
 
-		// wait for all threads end
-		for (int j = 0; j < supported_thread_num; j++) {
-			threads[j].join();
-		}
-
-		// flip ping pong
-		ping_pong = !ping_pong;
-
-		// the error is small enough
-		if (vertex_heat_standard_error() < 1e-5) {
-			break;
-		}
-	}
+        // Check for convergence
+        if (vertex_heat_standard_error() < 1e-5) {
+            std::cout << "Converged after " << i << " iterations" << std::endl;
+            break;
+        }
+    }
 }
 
 int get_nearest_bone(const int index)
@@ -381,6 +424,37 @@ void generate_weight_for_vertices()
 			// assign vertex weight for isolated vertices, simply attach to the nearest bone.
 			vertices[i].weights.resize(1);
 			vertices[i].weights.shrink_to_fit();
+			vertices[i].weights[0].bone = get_nearest_bone(i);
+			vertices[i].weights[0].weight = 1.0f;
+		}
+
+		// Add minimum weight threshold
+		const float MIN_WEIGHT_THRESHOLD = 0.01f;
+		
+		// Filter out very small weights
+		std::vector<Weight> significantWeights;
+		float totalSignificantWeight = 0.0f;
+		
+		for (const auto& weight : vertices[i].weights) {
+			if (weight.weight >= MIN_WEIGHT_THRESHOLD) {
+				significantWeights.push_back(weight);
+				totalSignificantWeight += weight.weight;
+			}
+		}
+		
+		// Normalize significant weights
+		if (totalSignificantWeight > 0.0f) {
+			for (auto& weight : significantWeights) {
+				weight.weight /= totalSignificantWeight;
+			}
+		}
+		
+		// Replace original weights with filtered ones
+		vertices[i].weights = significantWeights;
+		
+		// Ensure we still have at least one weight
+		if (vertices[i].weights.empty()) {
+			vertices[i].weights.resize(1);
 			vertices[i].weights[0].bone = get_nearest_bone(i);
 			vertices[i].weights[0].weight = 1.0f;
 		}
@@ -617,9 +691,12 @@ void add_triangle(int n)
 				};
 				float boxhalfsize[3] = { 0.5f * grid_size, 0.5f * grid_size, 0.5f * grid_size };
 				float triverts[3][3] = {
-					{ vertices[triangles[n].v[0]].pos.x, vertices[triangles[n].v[0]].pos.y, vertices[triangles[n].v[0]].pos.z },
-					{ vertices[triangles[n].v[1]].pos.x, vertices[triangles[n].v[1]].pos.y, vertices[triangles[n].v[1]].pos.z },
-					{ vertices[triangles[n].v[2]].pos.x, vertices[triangles[n].v[2]].pos.y, vertices[triangles[n].v[2]].pos.z }
+					{ vertices[triangles[n].v[0]].pos.x, vertices[triangles[n].v[0]].pos.y,
+					vertices[triangles[n].v[0]].pos.z },
+					{ vertices[triangles[n].v[1]].pos.x, vertices[triangles[n].v[1]].pos.y,
+					vertices[triangles[n].v[1]].pos.z },
+					{ vertices[triangles[n].v[2]].pos.x, vertices[triangles[n].v[2]].pos.y,
+					vertices[triangles[n].v[2]].pos.z }
 				};
 				// detect collision
 				bool touched = (triBoxOverlap(boxcenter, boxhalfsize, triverts) == 1);
@@ -646,9 +723,15 @@ void add_all_bones()
 
 void add_bone(const std::vector<Bone>& bones, int bone_index)
 {
-	// one step equal to grid size multiply step scale
-	const float step_scale = 0.25f;
-
+	// Decrease step scale for finer bone point sampling
+	float step_scale = 0.1f;
+	
+	// For larger grid sizes, adjust the step scale to avoid creating too many bone points
+	if (max_grid_num > 256) {
+		step_scale = 0.1f * (256.0f / static_cast<float>(max_grid_num));
+		step_scale = std::max(step_scale, 0.01f); // Don't go below a minimum value
+	}
+	
 	structvec3 ray_origin = bones[bone_index].head;
 	structvec3 ray_target = bones[bone_index].tail;
 
@@ -1092,7 +1175,7 @@ void calculate_darkness_in_range(const int start, const int block_size)
 {
 	// Loop through in the range.
 	for (int i = start; i < static_cast<int>(bone_points.size()); i += block_size) {
-		std::cout << "Proceeding bone point: " << i << " of " << bone_points.size() << std::endl;
+		// std::cout << "Proceeding bone point: " << i << " of " << bone_points.size() << std::endl;
 		bone_point_darkness(i);
 		bone_point_glow(i);
 	}
@@ -1301,10 +1384,10 @@ float grid_size;
 structvec3 grid_offset;
 std::vector<Voxel> voxels;
 bool ping_pong;
-std::vector<Vertex> vertices;
-std::vector<Triangle> triangles;
-std::vector<Bone> bones;
-std::vector<Bone_Point> bone_points;
+// std::vector<Vertex> vertices;
+// std::vector<Triangle> triangles;
+// std::vector<Bone> bones;
+// std::vector<Bone_Point> bone_points;
 bool detect_solidify;
 };
 
@@ -1365,3 +1448,183 @@ int main(int argc, const char *argv[])
 
 	return 0;
 }
+
+class SurfaceHeatDiffuse {
+public:
+    SurfaceHeatDiffuse(
+        const val& vertices,
+        const val& indices,
+        const val& bones,
+        int maxGridNum = 128,
+        int maxDiffuseLoop = 5,
+        int maxSampleNum = 64,
+        int maxInfluence = 4,
+        float maxFallOff = 0.2f,
+        int sharpness = 3,
+        bool detectSolidify = false
+    ) {
+        // Convert JS arrays to C++ vectors
+        auto vertexArray = convertJSArrayToVector<float>(vertices);
+        auto indexArray = convertJSArrayToVector<int>(indices);
+        auto boneArray = convertJSArrayToVector<float>(bones);
+        
+        // Validate maxGridNum to prevent memory issues in the browser
+        // For browsers, very large grid sizes can cause memory allocation failures
+        // We'll cap it at a reasonable maximum while still allowing larger than 1024
+        if (maxGridNum > 4096) {
+            std::cout << "Warning: Requested grid size " << maxGridNum 
+                      << " is very large. Capping at 4096 for stability." << std::endl;
+            maxGridNum = 4096;
+        }
+        
+        // For larger grid sizes, automatically reduce diffusion loops to prevent excessive calculation
+        if (maxGridNum > 1024) {
+            // Adjust diffusion loops proportionally to grid size
+            int originalDiffuseLoop = maxDiffuseLoop;
+            maxDiffuseLoop = std::max(1, maxDiffuseLoop * 1024 / maxGridNum);
+            std::cout << "Large grid size detected. Adjusting diffuse loops from " 
+                      << originalDiffuseLoop << " to " << maxDiffuseLoop << std::endl;
+        }
+        
+        // Create temporary files for the mesh and bone data
+        writeMeshFile(vertexArray, indexArray);
+        writeBoneFile(boneArray);
+        
+        // Initialize VoxelGrid
+        grid = std::make_unique<VoxelGrid>(
+            "temp_mesh.txt",
+            "temp_bone.txt",
+            "temp_weight.txt",
+            maxGridNum,
+            maxDiffuseLoop,
+            maxSampleNum,
+            maxInfluence,
+            maxFallOff,
+            sharpness,
+            detectSolidify
+        );
+    }
+
+    val calculateWeights() {
+        if (!grid) return val::null();
+
+        grid->calculate_all_voxel_darkness();
+        grid->diffuse_all_heats();
+        grid->generate_weight_for_vertices();
+        
+        // Convert the weights to a format suitable for Three.js skinning
+        return getWeightsForThreeJS();
+    }
+
+private:
+    std::unique_ptr<VoxelGrid> grid;
+
+    template<typename T>
+    std::vector<T> convertJSArrayToVector(const val& jsArray) {
+        std::vector<T> result;
+        const auto length = jsArray["length"].as<unsigned>();
+        result.reserve(length);
+        
+        for (unsigned i = 0; i < length; i++) {
+            result.push_back(jsArray[i].as<T>());
+        }
+        
+        return result;
+    }
+
+    void writeMeshFile(const std::vector<float>& vertices, const std::vector<int>& indices) {
+        std::ofstream file("temp_mesh.txt");
+        
+        // Write vertices
+        for (size_t i = 0; i < vertices.size(); i += 3) {
+            file << "v," << vertices[i] << "," << vertices[i + 1] << "," << vertices[i + 2] << "\n";
+        }
+        
+        // Write faces
+        for (size_t i = 0; i < indices.size(); i += 3) {
+            file << "f," << indices[i] << "," << indices[i + 1] << "," << indices[i + 2] << "\n";
+        }
+        
+        file.close();
+    }
+
+    void writeBoneFile(const std::vector<float>& bones) {
+        std::ofstream file("temp_bone.txt");
+        
+        // Write bones (assuming format: name,headX,headY,headZ,tailX,tailY,tailZ)
+        for (size_t i = 0; i < bones.size(); i += 7) {
+            file << "b,bone" << (i/7) << ","
+                 << bones[i + 1] << "," << bones[i + 2] << "," << bones[i + 3] << ","
+                 << bones[i + 4] << "," << bones[i + 5] << "," << bones[i + 6] << "\n";
+        }
+        
+        file.close();
+    }
+
+    val getWeightsForThreeJS() {
+        val result = val::object();
+        val indices = val::array();
+        val weights = val::array();
+        
+        // Each vertex must have exactly 4 weight/index pairs for Three.js
+        for (const auto& vertex : grid->vertices) {
+            // Get the weights for this vertex
+            float totalWeight = 0.0f;
+            for (size_t i = 0; i < 4; i++) {
+                if (i < vertex.weights.size()) {
+                    indices.call<void>("push", vertex.weights[i].bone);
+                    weights.call<void>("push", vertex.weights[i].weight);
+                    totalWeight += vertex.weights[i].weight;
+                } else {
+                    // Pad with zero weights and first bone index
+                    indices.call<void>("push", 0);
+                    weights.call<void>("push", 0.0f);
+                }
+            }
+            
+            // Normalize weights if they don't sum to 1
+            if (totalWeight > 0.0f && std::abs(totalWeight - 1.0f) > 0.001f) {
+                size_t offset = weights["length"].as<size_t>() - 4;
+                for (size_t i = 0; i < std::min(size_t(4), vertex.weights.size()); i++) {
+                    float normalizedWeight = vertex.weights[i].weight / totalWeight;
+                    weights.set(offset + i, normalizedWeight);
+                }
+            }
+        }
+        
+        result.set("indices", indices);
+        result.set("weights", weights);
+        return result;
+    }
+};
+
+// Bind the class to JavaScript
+EMSCRIPTEN_BINDINGS(surface_heat_diffuse) {
+    class_<SurfaceHeatDiffuse>("SurfaceHeatDiffuse")
+        .constructor<val, val, val, int, int, int, int, float, int, bool>()
+        .function("calculateWeights", &SurfaceHeatDiffuse::calculateWeights);
+}
+
+
+// // Bind the class to JavaScript
+// EMSCRIPTEN_BINDINGS(VoxelGridModule) {
+//     class_<VoxelGrid>("VoxelGrid")
+//         .constructor<std::string, std::string, std::string, int, int, int, int, float, int, bool>()
+//         .function("calculateAllVoxelDarkness", &VoxelGrid::calculate_all_voxel_darkness)
+//         .function("diffuseAllHeats", &VoxelGrid::diffuse_all_heats)
+//         .function("generateWeightForVertices", &VoxelGrid::generate_weight_for_vertices)
+//         .function("exportBoneWeights", &VoxelGrid::export_bone_weights);
+// }
+
+// // Main function to be called from JavaScript
+// EMSCRIPTEN_KEEPALIVE
+// void runVoxelGrid(const std::string& meshFile, const std::string& boneFile, const std::string& weightFile,
+//                  int maxGridNum, int maxDiffuseLoop, int maxSampleNum, int maxInfluence,
+//                  float maxFallOff, int sharpness, bool detectSolidify) {
+//     VoxelGrid grid(meshFile, boneFile, weightFile, maxGridNum, maxDiffuseLoop, maxSampleNum,
+//                   maxInfluence, maxFallOff, sharpness, detectSolidify);
+//     grid.calculate_all_voxel_darkness();
+//     grid.diffuse_all_heats();
+//     grid.generate_weight_for_vertices();
+//     grid.export_bone_weights();
+// }

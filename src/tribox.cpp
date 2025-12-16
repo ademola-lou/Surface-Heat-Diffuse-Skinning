@@ -1,6 +1,6 @@
 /********************************************************/
 /* AABB-triangle overlap test code                      */
-/* by Tomas Akenine-M¿ler                              */
+/* by Tomas Akenine-Mï¿½ler                              */
 /* Function: int triBoxOverlap(float boxcenter[3],      */
 /*          float boxhalfsize[3],float triverts[3][3]); */
 /* History:                                             */
@@ -11,6 +11,7 @@
 /* suggestions and discussions on how to optimize code. */
 /* Thanks to David Hunt for finding a ">="-bug!         */
 /********************************************************/
+#include "tribox.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -106,7 +107,7 @@ if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
 rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y];   \
 if(min>rad || max<-rad) return 0;
 
-int triBoxOverlap(float boxcenter[3],float boxhalfsize[3],float triverts[3][3])
+int triBoxOverlap(float boxcenter[3], float boxhalfsize[3], float triverts[3][3])
 {
     /*    use separating axis theorem to test overlap between triangle and box */
     /*    need to test for overlap in these directions: */

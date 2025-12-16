@@ -1,0 +1,19 @@
+{
+  "name": "surface-heat-diffuse",
+  "version": "1.0.0",
+  "description": "Surface Heat Diffuse weight calculation for Three.js",
+  "main": "example.js",
+  "type": "module",
+  "scripts": {
+    "start": "node example.js",
+    "serve": "http-server . -c-1 --cors -p 8080",
+    "build": "cd build && emmake make && cd ..",
+    "dev": "npm run build && npm run serve"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+} 

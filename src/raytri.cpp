@@ -5,6 +5,7 @@
 /* by Tomas Moller, May 2000                        */
 
 #include <math.h>
+#include "raytri.h"
 
 #define EPSILON 0.000001
 #define CROSS(dest,v1,v2) \
